@@ -1,0 +1,143 @@
+#include <Adafruit_NeoPixel.h>
+
+// Definicje pinów i parametrów
+#define LED_PIN 6
+#define NUM_LEDS 8
+#define SENSOR_PIN A0
+#define BRIGHTNESS 1
+#define PULSE_BRIGHTNESS 3
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// Kalibracja czujnika
+const int moistureMin = 180; // Zanurzenie w wodzie (100%)
+const int moistureMax = 475; // Sucha gleba (0%)
+
+// Tolerancje wilgotności
+const int wetThreshold = 60;   // % - zbyt mokro
+const int dryThreshold = 40;   // % - zbyt sucho
+
+// Zmienne globalne
+unsigned long lastUpdateTime = 0;
+const unsigned long updateInterval = 1000; // Odświeżanie co sekundę
+#define MAX_READINGS 100
+int readings[MAX_READINGS]; // Tablica na pomiary
+int readingIndex = 0;       // Aktualny indeks w tablicy
+int totalReadings = 0;      // Liczba zapisanych pomiarów
+
+void setup() {
+  Serial.begin(9600);
+  strip.begin();
+  strip.setBrightness(10);
+  strip.show();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Odświeżanie co 1 sekundę
+  if (currentMillis - lastUpdateTime >= updateInterval) {
+    lastUpdateTime = currentMillis;
+
+    // Pobranie pomiaru i zapisanie do tablicy
+    int sensorValue = analogRead(SENSOR_PIN);
+    int moisturePercent = map(sensorValue, moistureMin, moistureMax, 100, 0);
+    moisturePercent = constrain(moisturePercent, 0, 100);
+    readings[readingIndex] = moisturePercent;
+
+    // Zarządzanie tablicą pomiarów
+    readingIndex = (readingIndex + 1) % MAX_READINGS;
+    if (totalReadings < MAX_READINGS) {
+      totalReadings++;
+    }
+
+    // Wyliczenie średniej z odrzuceniem 20% najniższych i najwyższych wartości
+    int stableAverage = calculateStableAverage();
+
+    Serial.print("Średnia wilgotność (stabilizowana): ");
+    Serial.print(stableAverage);
+    Serial.println("%");
+
+    // Obsługa diod na podstawie średniej
+    if (stableAverage > wetThreshold) {
+      displayWet();
+    } else if (stableAverage >= dryThreshold) {
+      displayOptimal(stableAverage);
+    } else {
+      displayDry();
+    }
+  }
+}
+
+// Funkcja do obliczania stabilizowanej średniej
+int calculateStableAverage() {
+  int sortedReadings[MAX_READINGS];
+  memcpy(sortedReadings, readings, totalReadings * sizeof(int));
+  sortArray(sortedReadings, totalReadings);
+
+  int discard = totalReadings / 5; // Odrzucamy 20% danych z obu końców
+  int sum = 0, count = 0;
+
+  for (int i = discard; i < totalReadings - discard; i++) {
+    sum += sortedReadings[i];
+    count++;
+  }
+  return count > 0 ? sum / count : 0;
+}
+
+// Funkcja do sortowania tablicy
+void sortArray(int arr[], int size) {
+  for (int i = 0; i < size - 1; i++) {
+    for (int j = 0; j < size - i - 1; j++) {
+      if (arr[j] > arr[j + 1]) {
+        int temp = arr[j];
+        arr[j] = arr[j + 1];
+        arr[j + 1] = temp;
+      }
+    }
+  }
+}
+
+// Funkcja: Zbyt mokro
+void displayWet() {
+  int blueBrightness = 40;
+  for (int i = 0; i < NUM_LEDS; i++) {
+    strip.setPixelColor(NUM_LEDS - 1 - i, strip.Color(0, 0, blueBrightness));
+  }
+  strip.show();
+}
+
+// Funkcja: Optymalne nawodnienie
+void displayOptimal(int moisturePercent) {
+  int ledsToLight = map(moisturePercent, dryThreshold, wetThreshold, 1, NUM_LEDS);
+  int greenBrightness = 30;
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    if (i < ledsToLight) {
+      strip.setPixelColor(NUM_LEDS - 1 - i, strip.Color(0, greenBrightness, 0));
+    } else {
+      strip.setPixelColor(NUM_LEDS - 1 - i, 0);
+    }
+  }
+  strip.show();
+}
+
+// Funkcja: Zbyt sucho
+void displayDry() {
+  static int brightness = 0;
+  static bool increasing = true;
+
+  if (increasing) {
+    brightness++;
+    if (brightness >= PULSE_BRIGHTNESS) {
+      increasing = false;
+    }
+  } else {
+    brightness--;
+    if (brightness <= 0) {
+      increasing = true;
+    }
+  }
+  strip.setPixelColor(NUM_LEDS - 1, strip.Color(brightness * 25, 0, 0));
+  strip.show();
+}
