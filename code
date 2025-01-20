@@ -1,4 +1,104 @@
+//       +------------------------------------+
+//       |              START                 |
+//       +------------------------------------+
+//                     |
+//                     v
+//       +------------------------------------+
+//       |  Inicjalizacja (setup)             |
+//       |  - Uruchom NeoPixel                |
+//       |  - Wczytaj kalibrację z EEPROM     |
+//       +------------------------------------+
+//                     |
+//                     v
+//       +------------------------------------+
+//       |               LOOP                 |
+//       +------------------------------------+
+//                     |
+//                     v
+//       +---------------------------------------------+
+//       |  Odczytaj stan przycisku (BUTTON_PIN)       |
+//       |  Czy przycisk wciśnięty?                    |
+//       +---------------------------------------------+
+//                |                  |
+//                v                  v
+//       +-----------------+     +--------------------+
+//       | Nie wciśnięty   |     | Wciśnięty          |
+//       | (pomijanie)     |     | - Rozpocznij       |
+//       |                 |     |   kalibrację       |
+//       +-----------------+     +--------------------+
+//                |                  |
+//                v                  v
+//       +---------------------------------------------+
+//       |  Czy minęło 1 sekunda od ostatniej aktual?  |
+//       +---------------------------------------------+
+//                |                  |
+//                v                  v
+//       +-----------------+     +--------------------+
+//       | Nie (czekaj)    |     | Tak                |
+//       +-----------------+     +--------------------+
+//                                     |
+//                                     v
+//       +---------------------------------------------+
+//       |  Pobierz odczyt czujnika (SENSOR_PIN)       |
+//       |  Przelicz wilgotność (%)                    |
+//       |  Zapisz w tablicy odczytów                  |
+//       +---------------------------------------------+
+//                                     |
+//                                     v
+//       +---------------------------------------------+
+//       |  Wylicz średnią wilgotność                  |
+//       |  Z odrzuceniem skrajnych wartości           |
+//       +---------------------------------------------+
+//                                     |
+//                                     v
+//       +---------------------------------------------+
+//       |  Czy wilgotność > wetThreshold?            |
+//       |  (np. > 60%)                                |
+//       +---------------------------------------------+
+//                |                  |
+//                v                  v
+//       +-----------------+     +--------------------------+
+//       | Nie             |     | Tak                      |
+//       |                 |     | - Wyświetl efekt         |
+//       |                 |     |   "zbyt mokro"           |
+//       +-----------------+     +--------------------------+
+//                |                  
+//                v
+//       +---------------------------------------------+
+//       | Czy wilgotność < dryThreshold?              |
+//       | (np. < 40%)                                 |
+//       +---------------------------------------------+
+//                |                  |
+//                v                  v
+//       +-----------------+     +--------------------------+
+//       | Nie             |     | Tak                      |
+//       |                 |     | - Wyświetl efekt         |
+//       |                 |     |   "zbyt sucho"           |
+//       +-----------------+     +--------------------------+
+//                |
+//                v
+//       +---------------------------------------------+
+//       |  Wilgotność między 40–60%?                  |
+//       +---------------------------------------------+
+//                |
+//                v
+//       +---------------------------------------------+
+//       |  Wyświetl "optymalny" efekt:                |
+//       |  - Włącz piksele proporcjonalnie do %       |
+//       |    nawodnienia:                             |
+//       |      np. 50% -> 4 piksele świecące          |
+//       +---------------------------------------------+
+//                |
+//                v
+//       +------------------------------------+
+//       |              LOOP END              |
+//       | Powrót do początku pętli           |
+//       +------------------------------------+
+
+
+
 #include <Adafruit_NeoPixel.h>
+#include <EEPROM.h>
 
 // Definicje pinów i parametrów
 #define LED_PIN 6
@@ -6,12 +106,32 @@
 #define SENSOR_PIN A0
 #define BRIGHTNESS 1
 #define PULSE_BRIGHTNESS 3
+#define BUTTON_PIN 2
+#include <EEPROM.h>
 
+
+// Adresy EEPROM
+#define EEPROM_MIN_ADDRESS 0
+#define EEPROM_MAX_ADDRESS 2
+
+
+void calibrateSensor();
+void loadCalibrationFromEEPROM();
+int calculateStableAverage();
+void sortArray(int arr[], int size);
+void displayWet();
+void displayDry();
+void displayOptimal(int moisturePercent);
+void rainbowEffect(int delayTime);
+byte wheel(byte WheelPos);
+
+// Inicjalizacja diod NeoPixel
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // Kalibracja czujnika
-const int moistureMin = 180; // Zanurzenie w wodzie (100%)
-const int moistureMax = 475; // Sucha gleba (0%)
+int moistureMin = 180; // Zanurzenie w wodzie (100%)
+int moistureMax = 475; // Sucha gleba (0%)
+bool isCalibrating = false;
 
 // Tolerancje wilgotności
 const int wetThreshold = 60;   // % - zbyt mokro
@@ -30,10 +150,33 @@ void setup() {
   strip.begin();
   strip.setBrightness(10);
   strip.show();
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP); // Przycisk z podciągnięciem
+  loadCalibrationFromEEPROM();       // Wczytaj kalibrację z EEPROM
 }
 
 void loop() {
   unsigned long currentMillis = millis();
+
+
+
+// Detekcja naciśnięcia przycisku (z eliminacją drgań styków)
+static unsigned long lastDebounceTime = 0;
+static bool lastButtonState = HIGH;
+int buttonState = digitalRead(BUTTON_PIN);
+
+if (buttonState == LOW && lastButtonState == HIGH && millis() - lastDebounceTime > 50) {
+lastDebounceTime = millis();
+calibrateSensor(); // Rozpoczęcie kalibracji
+}
+lastButtonState = buttonState;
+
+
+
+
+
+
+
 
   // Odświeżanie co 1 sekundę
   if (currentMillis - lastUpdateTime >= updateInterval) {
@@ -68,6 +211,108 @@ void loop() {
     }
   }
 }
+
+// Funkcja do kalibracji
+void calibrateSensor() {
+isCalibrating = true;
+
+// Kalibracja MIN (suchy czujnik)
+showColor(strip.Color(255, 0, 0), 1); // 3 jedno-sekundowe mrugnięcia czerwonym kolorem przed kalibracją
+for (int i = 0; i < 4; i++) {
+showColor(strip.Color(255, 0, 0), 1); // Czerwony przez 1 sekundę
+delay(1000);
+showColor(0, 1); // Wyłącz LED
+delay(1000);
+}
+
+int dryValues[10];
+for (int i = 0; i < 10; i++) {
+dryValues[i] = analogRead(SENSOR_PIN);
+delay(500); // Czekaj pół sekundy między odczytami
+}
+
+// Obcinanie górnych i dolnych 20% wyników
+sortArray(dryValues, 10);
+int trimmedValues[6];
+for (int i = 2; i < 8; i++) {
+trimmedValues[i - 2] = dryValues[i];
+}
+
+// Liczenie średniej z pozostałych wyników
+int minValue = 0;
+for (int i = 0; i < 6; i++) {
+minValue += trimmedValues[i];
+}
+minValue /= 6;
+
+// Zapisz do EEPROM (suchy czujnik)
+EEPROM.put(EEPROM_MAX_ADDRESS, minValue);  // Zapisz jako maksymalną wartość, ponieważ chcemy odwrotną kalibrację
+Serial.print("Kalibracja MIN (suchy): ");
+Serial.println(minValue);
+
+// 5-sekundowe długie świecenie czerwonym kolorem po kalibracji MIN
+showColor(strip.Color(255, 0, 0), 5); // Czerwony przez 5 sekund
+delay(500); // Krótkie opóźnienie
+
+delay(3000); // Czekaj na umieszczenie czujnika w wodzie
+
+// Kalibracja MAX (mokry czujnik)
+showColor(strip.Color(0, 0, 255), 1); // 3 jedno-sekundowe mrugnięcia niebieskim kolorem przed kalibracją
+for (int i = 0; i < 4; i++) {
+showColor(strip.Color(0, 0, 255), 1); // Niebieski przez 1 sekundę
+delay(1000);
+showColor(0, 1); // Wyłącz LED
+delay(1000);
+}
+
+int wetValues[10];
+for (int i = 0; i < 10; i++) {
+wetValues[i] = analogRead(SENSOR_PIN);
+delay(500); // Czekaj pół sekundy między odczytami
+}
+
+// Obcinanie górnych i dolnych 20% wyników
+sortArray(wetValues, 10);
+int trimmedWetValues[6];
+for (int i = 2; i < 8; i++) {
+trimmedWetValues[i - 2] = wetValues[i];
+}
+
+// Liczenie średniej z pozostałych wyników
+int maxValue = 0;
+for (int i = 0; i < 6; i++) {
+maxValue += trimmedWetValues[i];
+}
+maxValue /= 6;
+
+// Zapisz do EEPROM (mokry czujnik)
+EEPROM.put(EEPROM_MIN_ADDRESS, maxValue);  // Zapisz jako minimalną wartość, ponieważ chcemy odwrotną kalibrację
+Serial.print("Kalibracja MAX (mokry): ");
+Serial.println(maxValue);
+
+// 5-sekundowe długie świecenie niebieskim kolorem po kalibracji MAX
+showColor(strip.Color(0, 0, 255), 5); // Niebieski przez 5 sekund
+delay(500); // Krótkie opóźnienie
+
+// pingpong potwierdzająca zakończenie kalibracji = min,max, cycles 
+pingPongEffect(strip, NUM_LEDS, 50, 250, 5); 
+
+// Załaduj nowe wartości z EEPROM
+loadCalibrationFromEEPROM();
+
+isCalibrating = false;
+}
+
+// Wczytanie kalibracji z EEPROM
+void loadCalibrationFromEEPROM() {
+EEPROM.get(EEPROM_MIN_ADDRESS, moistureMin);
+EEPROM.get(EEPROM_MAX_ADDRESS, moistureMax);
+Serial.print("Załadowano kalibrację z EEPROM: MIN = ");
+Serial.print(moistureMin);
+Serial.print(", MAX = ");
+Serial.println(moistureMax);
+}
+
 
 // Funkcja do obliczania stabilizowanej średniej
 int calculateStableAverage() {
@@ -141,3 +386,63 @@ void displayDry() {
   strip.setPixelColor(NUM_LEDS - 1, strip.Color(brightness * 25, 0, 0));
   strip.show();
 }
+
+
+
+
+
+// Pingpong - na zakonczenie kalibracji - i powrot do programu 
+void pingPongEffect(Adafruit_NeoPixel& strip, int numLeds, int minPwm, int maxPwm, int cycles) {
+  int direction = 1;   // Kierunek ruchu (1 = w prawo, -1 = w lewo)
+  int position = 0;    // Początkowa pozycja diody
+  bool redToBlue = true; // Kierunek zmiany koloru (czerwony -> niebieski lub odwrotnie)
+  int currentCycle = 0; // Licznik cykli
+
+  int pwmLevels = maxPwm - minPwm + 1; // Liczba poziomów PWM
+  float timePerPwm = 1000.0 / pwmLevels; // Czas na jeden poziom PWM w ms
+
+  while (currentCycle < cycles) {
+    // Płynne przejście jasności
+    for (int pwm = minPwm; pwm <= maxPwm; pwm++) {
+      // Kolor w zależności od kierunku
+      uint32_t color = redToBlue ? strip.Color(pwm, 0, 0) : strip.Color(0, 0, pwm);
+      
+      // Zresetowanie wszystkich diod
+      strip.clear();
+
+      // Ustawienie koloru aktualnej pozycji
+      strip.setPixelColor(position, color);
+      strip.show();
+
+      // Opóźnienie dla równomiernego czasu
+      delay(timePerPwm);
+    }
+
+    // Przesunięcie pozycji w kierunku
+    position += direction;
+
+    // Sprawdzenie odbicia od brzegów
+    if (position == 0 || position == numLeds - 1) {
+      direction = -direction; // Zmiana kierunku
+      redToBlue = !redToBlue; // Zmiana koloru
+      currentCycle++;         // Zliczenie cyklu
+    }
+  }
+
+  // Wyłącz wszystkie diody po zakończeniu
+  strip.clear();
+  strip.show();
+}
+
+
+// Funkcja do migania kolorem
+void showColor(uint32_t color, int seconds) {
+  for (int i = 0; i < seconds * 2; i++) {
+    for (int j = 0; j < NUM_LEDS; j++) {
+      strip.setPixelColor(j, (i % 2 == 0) ? color : 0);
+    }
+    strip.show();
+    delay(500);
+  }
+}
+
